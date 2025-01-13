@@ -144,6 +144,12 @@ create API, set up API and domain
 
 === SSL certificate
 
+*0. Change to root*
+
+> https://github.com/acmesh-official/acme.sh/wiki/sudo
+
+You should install acme.sh in root.
+
 *1. Install acme.sh*
 
 ```bash
@@ -778,7 +784,14 @@ $ docker run -d -p 9443:9443 -p 8000:8000  --restart=always --name portainer\
     portainer/portainer-ce\
     --sslcert /cert/docker.example.com.cer\
     --sslkey /cert/docker.example.com.key
+$ acme.sh --install-cert -d docker.example.com \
+  --key-file <somepath>/ssl/docker.example.com.key  \
+  --cert-file <somepath>/ssl/docker.example.com.cer  \
+  # --fullchain-file <somepath>/ssl/fullchain.cer 
+  --reloadcmd "docker restart portainer"
 ```
+
+
 
 Then go to `https://<docker-ct-ip>:9443` to set up portainer.
 
@@ -971,6 +984,8 @@ services:
       - 6881:6881/udp
     restart: unless-stopped
 ```
+
+Default account admin and find password from log.
 
 WARNING: The `WEBUI_PORT` and `TORRENTING_PORT` must be forward to the same port!
 

@@ -84,7 +84,7 @@ $ acme.sh --issue -d example.com --standalone
 
     .. DNS verification: requires the validation of DNS resolution records with a dns resolver provider, such as Cloudflare, DNSPod.
 
-        *** DNS API mode
+        *** DNS API mode(Frequently used)
 +
 --
 Use dns resolver provider to verify
@@ -113,3 +113,5 @@ $ crontab -l
 ```bash
 $ acme.sh --remove -d example.com
 ```
+
+== Add renew hook
