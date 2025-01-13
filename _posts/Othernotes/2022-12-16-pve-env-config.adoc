@@ -9,7 +9,7 @@
 * Enable IOMMU: for IO divide
 * SVM mode: virtualize
 * SCM disable(UEFI boot): proxmox boot mode
-* VT-D(intel), AMD-V(AMD) # maybe not necessary
+* VT-D(intel), AMD-V(AMD)
 
 == Install PVE
 
@@ -61,11 +61,11 @@ Comment enterprise source
 # For AMD users
 + GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on pcie_acs_override=downstream,multifunction video=vesafb:off video=efifb:off"
 ```
-Some of them may not necessary, but I added `pcie_acs_override=downstream,multifunction`
+`amd_iommu=on pcie_acs_override=downstream,multifunction` is for seperate IOMMU groups.
 
-NOTE: `efifb:off` disable efi-booting display devices, `vesafb:off` disable vesa-booting display devices
+`efifb:off` disable efi-booting display devices, `vesafb:off` disable vesa-booting display devices, this is necessary for gpu passing through. 
 
-then `update-grub`
+then run command `update-grub`
 
 ./etc/modules
 ```diff
@@ -144,15 +144,48 @@ create API, set up API and domain
 
 === SSL certificate
 
-Step 1 and 2 is the same as the following section menu:Install TrueNAS Scale[SSL certificate from certbot]
+*1. Install acme.sh*
+
+```bash
+# If you can curl `raw.githubusercontent.com`
+$ curl https://get.acme.sh | sh -s email=username@example.com 
+# If you cannot
+$ git clone https://gitee.com/neilpang/acme.sh.git
+$ cd acme.sh
+$ ./acme.sh --install -m my@example.com
+```
+
+```bash
+$ source `~/.bashrc` # or reopen the shell
+```
+
+*2. Choose default CA*
+
+```bash
+$ acme.sh --set-default-ca --server letsencrypt
+```
 
 *3. Issue SSL certificates*
 
+* If using Ali 
++
+--
 ```bash
-$ export DP_Id="1234"
-$ export DP_Key="sADDsdasdgdsf" # API token for DP
-$ acme.sh --debug --issue --dns dns_dp -d www.example.com --force
+$ export Ali_Key="key"
+$ export Ali_Secret="secret"
+$ acme.sh --debug --issue --dns dns_ali -d <domain>.example.com --force
 ```
+--
+
+* If using Tencent 
++
+--
+```bash
+$ export DP_Id="id"
+$ export DP_Key="key" # API token for DP
+$ acme.sh --debug --issue --dns dns_dp -d <domain>.example.com --force
+```
+--
 
 *4. Install certificate for PVE*
 
@@ -342,7 +375,7 @@ Host github.com
     Port 443
 ```
 
-== Install windows and config GPU pass-through
+== Windows
 
 === Install windows
 
@@ -380,7 +413,13 @@ menu:网络设置[防火墙 > 高级设置 > 入站设置（最下）> TCP-WSS-I
 
 . Change Display to `none`, add select `Primary GPU` option.
 
-=== Hide vm from guest(for installing GPU driver)
+=== Disk pass-through
+
+> https://www.vumstar.com/4888/
+
+Use `lsblk` and `ls -la /sys/dev/block/ | grep -v loop | grep -v dm` to find out which disk in use by pve system, then add another disk as PCIE device for Windows vm.
+
+=== Hide vm from guest
 
 Edit `/etc/pve/qemu-server/<vm-id>.conf` in pve host.
 
@@ -475,8 +514,8 @@ Get the `Id` and `Token` from `DNSPod`
 
 ```bash
 $ export DP_Id="1234"
-$ export DP_Key="sADDsdasdgdsf" # API token for DP
-$ acme.sh --issue --dns dns_dp -d www.example.com --keylength ec-256
+$ export DP_Key="sADDsdasdgdsf" # wwwPI token for DP
+$ acme.sh --debug --issue --dns dns_dp -d *.example.com --keylength ec-256 --force
 ```
 
 *4. Install certificate for TrueNAS*
@@ -497,11 +536,11 @@ Edit it
 api_key = 1-something
 ```
 
-```bash
-$ acme.sh --install-cert -d www.example.com --reloadcmd "~/deploy-freenas/deploy_freenas.py"
-```
+Also to edit `deploy_freenas.py` to change the cert location or the truenas http service port
 
-NOTE: You may also need to edit `deploy_freenas.py` to change the cert location or the truenas http service port
+```bash
+$ acme.sh --install-cert --ecc -d www.example.com --reloadcmd "~/deploy-freenas/deploy_freenas.py"
+```
 
 Then the certificates are now available in the certificate tab.
 
@@ -752,8 +791,8 @@ TIP: Change port 9443 to 9000 to use without ssl
 menu:local[Stack > Add stack]
 
 - Docker cmd line
-+
-menu:local[Container >Add container]
++ 
+menu:local[Container > Add container]
 
 === Applications
 
@@ -1199,3 +1238,12 @@ Then add `Xiaomi MIoT` integration, now you can see all your devices, rename the
 +
 Add `HomeKit` integration, scan the QR code at notification panel to finish setting
 
+== Trouble shooting
+
+* Network down after adding new m.2 ssd
+
+This is because the name of your network card is changed in the system, but the configuration in `/etc/network/interface` has not been modified, try change the card name in`/etc/network/interface` using the name given bt `ip addr` command.
+
+Then restart your network by `service networing restart` command.
+
+* 
