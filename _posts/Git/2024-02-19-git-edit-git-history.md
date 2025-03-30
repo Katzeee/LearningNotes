@@ -23,7 +23,7 @@ fi
 
 ## `git filter-repo`
 
-`git filter-repo` can also do like this.
+`git filter-repo` can also do like this. You can install it use `pip3 install git-filter-repo`
 
 ```bash
 $ git filter-repo --email-callback '
@@ -36,6 +36,15 @@ $ git filter-repo --email-callback '
         commit.committer_email = b"newemail@example.com"
 '
 ```
+
+Delete all history of one file
+
+```bash
+$ git filter-repo --path <path-to-file> --invert-paths # <1>
+```
+<1> use '/' not '\\' to express dir, e.g. 'dir/file.ext'
+
+NOTE: If this file is still being tracked, use `git rm` first. 
 
 ## Difference
 
