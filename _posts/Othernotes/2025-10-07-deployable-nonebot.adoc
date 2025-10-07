@@ -1,0 +1,49 @@
+= Deployable NoneBot
+:revdate: 2025-10-07
+:page-category: Othernotes
+:page-tags: [nonebot, python]
+
+!!! Note: May should not nb to create a deployable nonebot project, it's too heavy.
+
+== Step 1: Create a python virtual environment
+
+```bash
+$ python -m venv .venv
+```
+
+== Step 2: Install poetry and nonebot2
+
+```bash
+$ pip install poetry
+$ poetry init
+$ poetry add nonebot2[fastapi2]
+$ poetry add nonebot-adapter-onebot
+$ poetry add nonebot-adapter-console
+```
+
+== Step 3: Create a nonebot project
+
+```bash
+$ nb 
+  > Generate entry for your bot
+```
+
+== Step 4: Setup `.env` and `poetry.toml`
+
+Add this to `poetry.toml`
+
+```toml
+[tool.nonebot]
+adapters = [
+    { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
+    { name = "Console", module_name = "nonebot.adapters.console" }
+]
+plugins = []
+plugin_dirs = ["march7th-bot/plugins"]
+builtin_plugins = ["echo"]
+```
+
+then config `.env`, `.env.dev` and `.env.prod` as you want.
+
+
+
