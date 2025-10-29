@@ -1,0 +1,210 @@
+= How to Build An Agent
+:revdate: 2025-10-22
+:page-category: AI
+:page-tags: [ai, agent]
+
+参考开源项目 link:https://github.com/volcengine/MineContext[MineContext]
+
+== 数据捕获
+
+这里关心的是数据来源
+
+== 数据处理
+
+=== 由捕获的数据获得 raw llm response
+
+system prompt 的位置对大模型的职责进行详细约束，可以涉及：职责总览，核心原则，输出格式，处理流程，字段规范，具体的识别规则，质量保障，隐私保护等多个方面。
+
+user prompt 的位置按照一定的格式阻止捕获的数据，针对图片，将其 encode 成 base64，可包含历史上下文，与一定量的行动指示。
+
+=== raw llm response 数据解析兜底
+
+在获得了来自 vlm/llm 的数据之后，虽然我们在提示词里约束了他的回答，但为了保证其可靠性，可以对其做一些兜底处理
+
+```python
+def parse_json_from_response(response: str) -> Optional[Any]:
+    """
+    Parse JSON object from LLM text response.
+
+    Handles code blocks and plain JSON strings, including fixing common format issues.
+
+    Args:
+        response (str): LLM text response or JSON string
+
+    Returns:
+        Optional[Any]: Parsed JSON object, None if parsing fails
+    """
+    if not isinstance(response, str):
+        return None
+
+    # Remove leading and trailing whitespace
+    response = response.strip()
+
+    # Strategy 1: Direct parsing
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Extract JSON from code blocks
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", response, re.DOTALL)
+    if match:
+        json_str = match.group(1).strip()
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Regex match JSON structure
+    match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", response)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 4: Parse after fixing common issues
+    try:
+        # Fix internal unescaped quote issues
+        fixed_response = _fix_json_quotes(response)
+        return json.loads(fixed_response)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 5: Use json_repair library
+    try:
+        return json_repair.loads(response)
+    except (json.JSONDecodeError, ValueError):
+        logger.error(f"Failed to parse JSON from response: {response}")
+
+    return None
+```
+
+=== 处理 raw llm response
+
+从 json 数据中提取字段，将其变成 python 数据结构便于后续取用，这部分需要注意做进一步的兜底，llm 的数据不一定可靠，会出现如时间戳错误，数据类型错误（int，str 不匹配）等问题
+
+可参考数据定义：
+
+```python
+class ProcessedContext(BaseModel):
+    """
+    Represents processed context data
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    properties: ContextProperties
+    extracted_data: ExtractedData
+    vectorize: Vectorize
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict
+    )  # metadata for storing structured entity information
+
+class ContextProperties(BaseModel):
+    """
+    Represents context data attributes
+    """
+
+    raw_properties: list[RawContextProperties] = Field(
+        default_factory=list
+    )  # raw context properties
+    create_time: datetime.datetime  # creation time
+    event_time: datetime.datetime  # event occurrence time, can be future
+    is_processed: bool = False  # whether processed
+    has_compression: bool = False  # whether compressed
+    update_time: datetime.datetime  # update time
+    call_count: int = 0  # call count, updated during online service calls
+    merge_count: int = 0  # merge count
+    duration_count: int = 1  # context duration count
+    enable_merge: bool = False
+    is_happend: bool = False  # whether occurred
+    last_call_time: Optional[datetime.datetime] = (
+        None  # last call time, updated during online service calls
+    )
+    # position: Optional[Dict[str, Any]] = None # context position in original data
+
+    # Document tracking fields
+    file_path: Optional[str] = None  # file path (empty for documents)
+    raw_type: Optional[str] = None  # raw type (e.g. 'vaults')
+    raw_id: Optional[str] = None  # raw ID (ID in vaults table)
+
+class ExtractedData(BaseModel):
+    """
+    Represents information extracted from context data
+    """
+
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    keywords: List[str] = Field(default_factory=list)  # keywords
+    entities: List[str] = Field(default_factory=list)  # entities
+    # tags: List[str] = Field(default_factory=list)  # tags
+    context_type: ContextType  # context type
+    # confidence: int = 0  # confidence
+    # importance: int = 0  # importance
+
+class Vectorize(BaseModel):
+    """
+    Vectorization configuration
+    """
+
+    content_format: ContentFormat = ContentFormat.TEXT
+    image_path: Optional[str] = None
+    text: Optional[str] = None
+    vector: Optional[List[float]] = None
+    # Future extension for multimodal embedding:
+    # images: Optional[List[Any]] = None  # PIL Images or image data for multimodal models
+```
+
+数据组织
+
+```python
+new_context = ProcessedContext(
+    properties=ContextProperties(
+        raw_properties=raw_context_properties,
+        source=ContextSource.SCREENSHOT,
+        create_time=now,
+        update_time=now,
+        event_time=event_time,
+        enable_merge=True,
+        is_happend=event_time <= now,
+    ),
+    extracted_data=extracted_data,
+    vectorize=Vectorize(
+        content_format=ContentFormat.TEXT,
+        text=f"{extracted_data.title} {extracted_data.summary}",
+    ),
+)
+```
+
+数据融合，在一个长期记忆或多步规划的实现中，可以由 Agent 将特定或相关的历史信息进行合并存储或传递给 llm
+
+== 数据存储
+
+存储使用 chromadb 向量数据库，因此需要先执行 vectorize，之后按照数据要求写入
+
+```python
+# 从 Context 转化为 dict
+doc = context.model_dump(
+    exclude_none=True, exclude={"properties", "extracted_data", "vectorize", "metadata"}
+)
+if context.extracted_data:
+    extracted_data_dict = context.extracted_data.model_dump(
+        exclude_none=True)
+    doc.update(extracted_data_dict)
+
+if context.metadata:
+    doc.update(context.metadata)
+
+if context.vectorize:
+    if context.vectorize.content_format == ContentFormat.TEXT:
+        doc["document"] = context.vectorize.text
+    doc["embedding"] = context.vectorize.vector
+
+# 持久化存储
+collection.upsert(
+    ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings
+)
+```
+
+== 数据检索
