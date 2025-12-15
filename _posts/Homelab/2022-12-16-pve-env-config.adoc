@@ -1,7 +1,7 @@
 = Pve Env Config
 :revdate: 2022-12-16
-:page-category: Othernotes
-:page-tags: [pve]
+:page-category: Homelab
+:page-tags: [pve, homelab]
 :experimental:
 
 == Bios Setting(important for hardware pass-through)
