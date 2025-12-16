@@ -1,0 +1,316 @@
+= Unraid USB Bluetooth Passthrough Issue
+:revdate: 2025-12-16
+:page-category: Homelab
+:page-tags: [unraid, bluetooth, usb, passthrough, virtualization]
+
+== Problem Description
+
+When passing through a USB Bluetooth device to a VM on Unraid, if only the Bluetooth device is passed through, everything works fine. However, when passing through two USB devices simultaneously (Bluetooth + audio device), the Bluetooth device has a **probability** of failing to be recognized, showing a `Bluetooth: hci0: Reading Intel version information failed (-110)` error.
+
+=== Environment
+
+==== Host System Information
+
+Unraid OS 7.2.2 (Linux 6.12.54-Unraid) on Intel Pentium G4560T.
+
+[source,bash]
+----
+root@Xunraid:~# uname -a
+Linux Xunraid 6.12.54-Unraid #1 SMP PREEMPT_DYNAMIC Tue Oct 21 15:58:46 PDT 2025 x86_64 Intel(R) Pentium(R) CPU G4560T @ 2.90GHz GenuineIntel GNU/Linux
+----
+
+[source,bash]
+----
+root@Xunraid:~# cat /etc/os-release
+NAME="Unraid OS"
+ID="unraid-os"
+ID_LIKE="slackware"
+PRETTY_NAME="Unraid OS 7.2 x86_64"
+CPE_NAME="cpe:/o:limetech:unraid-os:7.2.2"
+VERSION="7.2.2 2025-11-21"
+VERSION_ID="7.2.2"
+VERSION_CODENAME="stable"
+HOME_URL="https://unraid.net/"
+SUPPORT_URL="https://support.unraid.net/"
+BUG_REPORT_URL="https://forums.unraid.net/"
+DOCUMENTATION_URL="https://docs.unraid.net/"
+VENDOR_NAME="Lime Technology, Inc."
+----
+
+==== USB Device Information
+
+Both devices are on Bus 001: Bluetooth `8087:0025` at port `1-14`, Audio `0c76:1700` at port `1-3`.
+
+[source,bash]
+----
+root@Xunraid:~# lsusb -t
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/16p, 480M
+    |__ Port 003: Dev 002, If 0, Class=Audio, Driver=usbfs, 12M
+    |__ Port 003: Dev 002, If 1, Class=Audio, Driver=usbfs, 12M
+    |__ Port 003: Dev 002, If 2, Class=Human Interface Device, Driver=usbfs, 12M
+    |__ Port 014: Dev 003, If 0, Class=Wireless, Driver=usbfs, 12M
+    |__ Port 014: Dev 003, If 1, Class=Wireless, Driver=usbfs, 12M
+/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/10p, 5000M
+    |__ Port 001: Dev 002, If 0, Class=Mass Storage, Driver=usb-storage, 5000M
+----
+
+[source,bash]
+----
+root@Xunraid:~# lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 002: ID 0c76:1700 JMTek, LLC. Fosi Audio MC351
+Bus 001 Device 003: ID 8087:0025 Intel Corp. Wireless-AC 9260 Bluetooth Adapter
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 002 Device 002: ID 0781:5583 SanDisk Corp. Ultra Fit
+----
+
+==== VM Configuration
+
+NixOS guest with 2.0 EHCI USB controller, using `<hostdev type='usb' managed='no'>` passthrough.
+
+== Root Cause Analysis
+
+=== Key Finding
+
+The core issue is **driver contention** between the host's `btusb` driver and QEMU's `usbfs` for the same USB Bluetooth device.
+
+=== Evidence Chain
+
+==== Evidence 1: USB Enumeration vs Initialization Failure
+
+The Bluetooth device (`8087:0025`) is successfully enumerated in both successful and failed cases. The failure occurs during the Intel Bluetooth initialization phase when `btusb` tries to send commands to the device.
+
+**Failed case** (from guest dmesg):
+
+[source,text]
+----
+[    3.185473] usb 1-2: New USB device found, idVendor=8087, idProduct=0025, bcdDevice= 0.02
+[    3.185479] usb 1-2: New USB device strings: Mfr=0, Product=0, SerialNumber=0
+[    5.244211] usbcore: registered new interface driver btusb
+[    7.245467] Bluetooth: hci0: Reading Intel version command failed (-110)
+[    7.247499] Bluetooth: hci0: command 0xfc05 tx timeout
+----
+
+**Successful case** (from guest dmesg):
+
+[source,text]
+----
+[    3.182135] usb 1-2: New USB device found, idVendor=8087, idProduct=0025, bcdDevice= 0.02
+[    3.182140] usb 1-2: New USB device strings: Mfr=0, Product=0, SerialNumber=0
+[    5.209094] usbcore: registered new interface driver btusb
+[    5.222662] Bluetooth: hci0: HCI LE Coded PHY feature bit is set, but its usage is not supported.
+----
+
+In both cases, the device enumerates successfully (`idVendor=8087, idProduct=0025`), but the failed case shows a timeout (`-110`) when trying to read the Intel version, while the successful case completes initialization.
+
+==== Evidence 2: Host Kernel Warning
+
+The host `dmesg` shows a critical warning when the failure occurs:
+
+[source,text]
+----
+[Mon Dec 15 22:20:08 2025] usb 1-14: usbfs: process 17937 (qemu-system-x86) did not claim interface 0 before use
+[Mon Dec 15 22:20:08 2025] usb 1-14: usbfs: process 17937 (qemu-system-x86) did not claim interface 0 before use
+[Mon Dec 15 22:20:08 2025] usb 1-14: usbfs: process 17937 (qemu-system-x86) did not claim interface 0 before use
+[Mon Dec 15 22:20:08 2025] usb 1-14: usbfs: process 17937 (qemu-system-x86) did not claim interface 0 before use
+[Mon Dec 15 22:20:08 2025] usb 1-14: usbfs: process 17937 (qemu-system-x86) did not claim interface 0 before use
+[Mon Dec 15 22:20:42 2025] usb 1-14: reset full-speed USB device number 3 using xhci_hcd
+[Mon Dec 15 22:20:45 2025] Bluetooth: hci0: Reading Intel version command failed (-110)
+[Mon Dec 15 22:20:45 2025] Bluetooth: hci0: command 0xfc05 tx timeout
+----
+
+This indicates that QEMU is accessing the USB device via `usbfs` while the host kernel driver (`btusb`) may still be managing it, causing interface claim/reset/control transfer timing conflicts.
+
+==== Evidence 3: Driver Binding State
+
+The success of VM startup directly correlates with the driver binding state. When checking `lsusb -t` on the host:
+
+**VM startup succeeds**: When `Driver=[none]` at startup, QEMU can claim the device and change it to `Driver=usbfs`:
+
+[source,bash]
+----
+root@Xunraid:~# lsusb -t
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/16p, 480M
+    |__ Port 014: Dev 003, If 0, Class=Wireless, Driver=usbfs, 12M
+    |__ Port 014: Dev 003, If 1, Class=Wireless, Driver=usbfs, 12M
+----
+
+**VM startup fails**: When `Driver=btusb` at startup, QEMU cannot properly claim the device:
+
+[source,bash]
+----
+root@Xunraid:~# lsusb -t
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/16p, 480M
+    |__ Port 014: Dev 003, If 0, Class=Wireless, Driver=btusb, 12M
+    |__ Port 014: Dev 003, If 1, Class=Wireless, Driver=btusb, 12M
+----
+
+==== Evidence 4: Multiple USB Device Impact
+
+When only one USB device (Bluetooth) is passed through, the driver transitions normally:
+* VM startup: `Driver=btusb` → `Driver=[none]` → `Driver=usbfs` (normal)
+* VM shutdown: `Driver=usbfs` → `Driver=btusb` (normal)
+
+When two USB devices are passed through simultaneously, the driver binding fails to transition:
+* VM startup: `Driver=btusb` remains `Driver=btusb` (fails)
+
+The guest dmesg shows both devices are enumerated, but only the Bluetooth device fails:
+
+[source,text]
+----
+[    2.157661] usb 1-1: New USB device found, idVendor=0c76, idProduct=1700, bcdDevice= 1.00
+[    2.157669] usb 1-1: Product: Fosi Audio MC351
+[    3.185473] usb 1-2: New USB device found, idVendor=8087, idProduct=0025, bcdDevice= 0.02
+[    7.245467] Bluetooth: hci0: Reading Intel version command failed (-110)
+----
+
+== Workaround Discovery
+
+During troubleshooting, a workaround was discovered through USB device hot-plugging:
+
+**The workaround**: When the VM is running normally with Bluetooth working (`Driver=usbfs`), if you plug in the audio device while the VM is running, then shut down the VM, the Bluetooth device's driver will become `Driver=[none]` instead of `Driver=btusb`. This allows the next VM startup to succeed.
+
+**Steps**:
+
+1. Keep both devices plugged in to the host system and pass through to the VM
+2. Start VM with only Bluetooth device plugged in (works normally)
+3. While VM is running, plug in the audio device USB cable
+4. Shut down the VM (not reboot)
+5. Start the VM again - Bluetooth will work normally
+
+**Why it works**: When the audio device is plugged in while the VM is running, the VM shutdown process doesn't properly rebind the Bluetooth device back to `btusb`. The device remains in `Driver=[none]` state, which allows QEMU to claim it successfully on the next startup.
+
+This workaround confirms the core issue: **VM startup success requires `Driver=[none]` at startup time**.
+
+== Solutions
+
+=== Solution 1: Blacklist btusb (Recommended if Host Bluetooth Not Needed)
+
+This is the simplest and most stable solution if you don't need Bluetooth on the Unraid host.
+
+==== Step 1: Create Blacklist Configuration
+
+Create `/boot/config/modprobe.d/blacklist.conf`:
+
+[source,text]
+----
+blacklist btusb
+----
+
+==== Step 2: Reboot Unraid
+
+After reboot, verify:
+
+[source,bash]
+----
+lsmod | grep btusb
+----
+
+Should return empty. Also check:
+
+[source,bash]
+----
+lsusb -t
+----
+
+The Bluetooth device (`1-14`) should show `Driver=[none]` instead of `Driver=btusb`.
+
+=== Solution 2: Manual Unbind (Temporary Testing)
+
+For testing purposes, you can manually unbind the interfaces. **Important**: Disable USB driver autoprobe first to prevent automatic rebinding:
+
+[source,bash]
+----
+# Disable USB driver autoprobe to prevent btusb from automatically rebinding after soft power-cycle
+echo 0 > /sys/bus/usb/drivers_autoprobe
+
+# Check current driver binding
+readlink /sys/bus/usb/devices/1-14:1.0/driver
+readlink /sys/bus/usb/devices/1-14:1.1/driver
+
+# Unbind from btusb
+echo -n '1-14:1.0' > /sys/bus/usb/drivers/btusb/unbind
+echo -n '1-14:1.1' > /sys/bus/usb/drivers/btusb/unbind
+
+# Soft power-cycle the device
+echo 0 > /sys/bus/usb/devices/1-14/authorized
+echo 1 > /sys/bus/usb/devices/1-14/authorized
+
+# Verify driver is [none]
+lsusb -t
+----
+
+**Re-enable autoprobe** (when you need it back):
+
+[source,bash]
+----
+echo 1 > /sys/bus/usb/drivers_autoprobe
+----
+
+Note: This is temporary and will be reset after reboot or when the device is re-enumerated. Disabling autoprobe prevents the system from automatically rebinding the device to `btusb` after unbinding.
+
+== Troubleshooting Commands
+
+=== Check USB Topology
+
+[source,bash]
+----
+lsusb -t
+----
+
+This shows the USB device tree and which driver is bound to each device.
+
+=== Check Driver Binding
+
+[source,bash]
+----
+readlink /sys/bus/usb/devices/1-14:1.0/driver
+readlink /sys/bus/usb/devices/1-14:1.1/driver
+----
+
+Shows which driver is currently bound to each interface.
+
+=== Monitor Host Kernel Messages
+
+[source,bash]
+----
+dmesg -T | grep -E '1-14|8087|btusb|usbfs|claim|reset|timeout|0xfc05'
+----
+
+Key indicators of the problem:
+* `usbfs: process (qemu-system-x86) did not claim interface 0 before use`
+* Multiple reset messages followed by timeout errors
+* `Reading Intel version command failed (-110)`
+
+=== Check Guest Kernel Messages
+
+In the guest VM:
+
+[source,bash]
+----
+dmesg -T | grep -E 'Bluetooth|btusb|hci0|usb 1-2|8087|-110'
+----
+
+== Additional Notes
+
+=== USB Controller Type
+
+The USB controller type in the guest VM can affect behavior:
+
+* **EHCI**: In some cases, when shutting down the VM with both devices connected, the Bluetooth driver may become `None` instead of `btusb`, allowing successful startup
+* **qemu-xhci**: May cause the Bluetooth driver to remain `btusb` after shutdown, leading to startup failures
+
+Test both controller types to see which works better for your setup.
+
+=== Device State After Unbind
+
+Even after unbinding `btusb`, the device may still be in a "dirty state" where it doesn't respond properly. This is why a soft power-cycle (deauthorize/authorize) is often needed in addition to unbinding.
+
+== Summary
+
+The root cause of the USB Bluetooth passthrough issue is driver contention between the host `btusb` driver and QEMU's `usbfs`. The solution is to ensure the Bluetooth device has `Driver=None` before VM startup, allowing QEMU to claim it properly.
+
+**Recommended approach**: If you don't need Bluetooth on the host, blacklist `btusb` modules.
+
+**Key takeaway**: VM startup success requires `Driver=[none]` at startup time. Monitor this with `lsusb -t` and the driver binding paths in `/sys/bus/usb/devices/`.
+
