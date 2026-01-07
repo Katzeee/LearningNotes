@@ -1,0 +1,394 @@
+= 3ds Max shiboken2 crash
+:revdate: 2026-01-07
+:page-category: TA
+:page-tags: [3dsmax, shiboken2, crash]
+
+Version: 
+
+- 3ds Max 2024.2
+
+- Maya 2024.2
+
+为了解决DCC中的编辑器十分难用，进行小段代码调试非常麻烦的问题，参考PS的调试方式，希望可以把代码发送到DCC执行。
+
+我尝试在DCC中起一个服务器去监听并执行代码。首先，监听不能跑在主线程，但在3ds Max中，其他线程的print或执行是没有办法被断点的，甚至有可能存在一些rt调用是UB。所以做法就是子线程跑一个监听，然后把代码发送到主线程执行，这里需要用到Qt的一些处理，代码如下（会崩溃版）：
+
+
+[source,python]
+----
+import socket
+import threading
+
+from PySide2.QtCore import QObject, Signal, Slot, QThread, QMutex, QWaitCondition
+from PySide2.QtWidgets import QApplication
+
+
+class RunnableWaitablePayload:
+    def __init__(self, func):
+        self.func = func
+        self.exception = None
+        self.wcnd = QWaitCondition()
+        self.mutex = QMutex()
+
+    def wait(self):
+        self.mutex.lock()
+        RUNNABLE_SIGNAL.sig.emit(self)
+        self.wcnd.wait(self.mutex)
+        self.mutex.unlock()
+        if self.exception:
+            raise self.exception
+
+    def run(self):
+        self.mutex.lock()
+        try:
+            self.func()
+        except Exception as e:
+            self.exception = e
+        self.wcnd.wakeAll()
+        self.mutex.unlock()
+
+
+class RunnableSignal(QObject):
+    sig = Signal(RunnableWaitablePayload)
+
+
+class RunnableSlot(QObject):
+    def __init__(self):
+        super(RunnableSlot, self).__init__()
+        self.moveToThread(QApplication.instance().thread())
+
+    @Slot(RunnableWaitablePayload)
+    def run(self, payload):
+        payload.run()
+
+
+RUNNABLE_SIGNAL = RunnableSignal()
+RUNNABLE_SLOT = RunnableSlot()
+RUNNABLE_SIGNAL.sig.connect(RUNNABLE_SLOT.run)
+
+
+def run_on_main_thread(func):
+    if QThread.currentThread() is QApplication.instance().thread():
+        func()
+        return
+    payload = RunnableWaitablePayload(func)
+    payload.wait()
+
+
+HOST = "127.0.0.1"
+PORT = 7002
+
+
+def execute_payload_on_main_thread(payload_str):
+    try:
+        exec(payload_str, globals(), globals())
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+
+
+def handle_client(conn):
+    try:
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+
+        payload = data.decode("utf-8")
+
+        run_on_main_thread(lambda: execute_payload_on_main_thread(payload))
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def server_loop():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(5)
+
+    print("[RemoteExec] Listening on {}:{}".format(HOST, PORT))
+
+    while True:
+        conn, _ = server.accept()
+        handle_client(conn)
+
+
+def start_server():
+    t = threading.Thread(target=server_loop)
+    t.daemon = True
+    t.start()
+
+
+start_server()
+----
+
+
+在Maya上能正常运行，但到了3ds Max这边，会出现一个很奇怪的问题：有时候断点调试了一会之后，Max会直接崩溃，堆栈信息如下：
+
+[source,text]
+----
+Traceback (most recent call last):
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\loader.py", line 97, in pyside_type_init
+    return parser.pyside_type_init(type_key, sig_strings)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\parser.py", line 448, in pyside_type_init
+    props = calculate_props(line)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\parser.py", line 344, in calculate_props
+    return parser.pyside_type_init(type_key, sig_strings)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\parser.py", line 280, in _resolve_type
+    return eval(result, namespace)
+  File "<string>", line 1, in <module>
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 1206, in __getitem__
+    return self.__getitem_inner__(params)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 312, in inner
+    return func(*args, **kwds)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 1212, in __getitem_inner__
+    result = _type_check(result, msg)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 171, in _type_check
+    raise TypeError(f"Plain {arg} is not valid as type argument")
+TypeError: Plain typing.Optional is not valid as type argument
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\loader.py", line 109, in make_help_text
+    return errorhandler.make_help_text(func)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\errorhandler.py", line 135, in make_help_text
+    sigs = get_signature(func)
+SystemError: <built-in function get_signature> returned a result with an exception set
+----
+
+看上去是typing的一个检查出错了，没有被catch，但逻辑上应该是不影响功能的。进去看了一下实现，这里没做异常判断直接崩溃了。
+
+[source,python]
+----
+def _resolve_type(thing, line, level, var_handler):
+    # Capture total replacements, first. Happens in
+    # "PySide2.QtCore.QCborStreamReader.StringResult[PySide2.QtCore.QByteArray]"
+    if thing in type_map:
+        return type_map[thing]
+    # Now the nested structures are handled.
+    if "[" in thing:
+        # handle primitive arrays
+        if re.search(r"\[\d*\]$", thing):
+            thing = _resolve_arraytype(thing, line)
+        # Handle a container return type. (see PYSIDE-921 in cppgenerator.cpp)
+        contr, thing = re.match(r"(.*?)\[(.*?)\]$", thing).groups()
+        # Special case: Handle the generic matrices.
+        if contr == matrix_pattern:
+            return handle_matrix(thing)
+        contr = var_handler(_resolve_type(contr, line, level+1, var_handler))
+        if isinstance(contr, _NotCalled):
+            raise SystemError("Container types must exist:", repr(contr))
+        contr = to_string(contr)
+        pieces = []
+        for part in _parse_arglist(thing):
+            part = var_handler(_resolve_type(part, line, level+1, var_handler))
+            if isinstance(part, _NotCalled):
+                # fix the tag (i.e. "Missing") by repr
+                part = repr(part)
+            pieces.append(to_string(part))
+        thing = ", ".join(pieces)
+        result = "{contr}[{thing}]".format(**locals())
+        return eval(result, namespace) # <------------------------ here!
+    return _resolve_value(thing, None, line)
+----
+
+为了获得更多的信息，稍微修改了一下实现，添加了不少日志：
+
+[source,python]
+----
+LOG_PATH = r"<PREFIX>\Desktop\max_pyside_debug.txt"
+
+def _resolve_type(thing, line, level, var_handler):
+    with open(LOG_PATH , "a") as f:
+        f.write(f"\n[DEBUG] Level {level} | Input thing: {thing}\n") # 入口 Log
+
+    if thing in type_map:
+        return type_map[thing]
+    
+    if "[" in thing:
+        if re.search(r"\[\d*\]$", thing):
+            thing = _resolve_arraytype(thing, line)
+        
+        match = re.match(r"(.*?)\[(.*?)\]$", thing)
+        if not match:
+             with open(LOG_PATH, "a") as f:
+                 f.write(f"[ERROR] Regex failed on: {thing}\n") # Log
+             return thing
+
+        contr, thing = match.groups()
+        
+        if contr == matrix_pattern:
+            return handle_matrix(thing)
+            
+        contr_resolved = _resolve_type(contr, line, level+1, var_handler)
+        contr = var_handler(contr_resolved)
+        
+        if isinstance(contr, _NotCalled):
+            raise SystemError("Container types must exist:", repr(contr))
+        
+        contr_str = to_string(contr)
+        pieces = []
+        for part in _parse_arglist(thing):
+            part_res = _resolve_type(part, line, level+1, var_handler)
+            part_val = var_handler(part_res)
+            if isinstance(part_val, _NotCalled):
+                part_val = repr(part_val)
+            pieces.append(to_string(part_val))
+        
+        thing_joined = ", ".join(pieces)
+        result = "{}[{}]".format(contr_str, thing_joined)
+        
+        with open(LOG_PATH, "a") as f:
+            f.write(f"[DEBUG] Eval Target: {result}\n") # eval 前 Log
+            
+        try:
+            return eval(result, namespace)
+        except Exception as e:
+            # 具体调用栈等信息
+            with open(LOG_PATH, "a") as f:
+                f.write("\n" + "="*50 + "\n")
+                f.write(f"[CRITICAL] Eval Failed!\n")
+                f.write(f"Target String: {result}\n")
+                f.write(f"Error Type: {type(e).__name__}\n")
+                f.write(f"Error Message: {str(e)}\n")
+                f.write("-" * 20 + " FULL TRACEBACK " + "-" * 20 + "\n")
+                import traceback
+                f.write(traceback.format_exc())
+                f.write("-" * 20 + " LOCAL VARIABLES " + "-" * 20 + "\n")
+                for name, val in locals().items():
+                    if name != 'f': # 避开文件句柄本身
+                        f.write(f"{name} = {repr(val)}\n")
+                f.write("="*50 + "\n")
+            # raise
+            
+    return _resolve_value(thing, None, line)
+----
+
+得到的关键 Log 如下：
+[source,text]
+----
+[DEBUG] Level 0 | Input thing: typing.Callable[...,typing.Optional[str]]
+[DEBUG] Level 1 | Input thing: typing.Callable
+[DEBUG] Level 1 | Input thing: ...
+[DEBUG] Level 1 | Input thing: typing.Optional[str]
+[DEBUG] Level 2 | Input thing: typing.Optional
+[DEBUG] Level 2 | Input thing: str
+[DEBUG] Eval Target: typing.Optional[str]
+[DEBUG] Eval Target: typing.Callable[..., typing.Optional]
+
+==================================================
+[CRITICAL] Eval Failed!
+Target String: typing.Callable[..., typing.Optional]
+Error Type: TypeError
+Error Message: Plain typing.Optional is not valid as type argument
+-------------------- FULL TRACEBACK --------------------
+Traceback (most recent call last):
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\Lib\site-packages\shiboken2\files.dir\shibokensupport\signature\parser.py", line 299, in _resolve_type
+    return eval(result, namespace)
+  File "<string>", line 1, in <module>
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 1206, in __getitem__
+    return self.__getitem_inner__(params)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 312, in inner
+    return func(*args, **kwds)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 1212, in __getitem_inner__
+    result = _type_check(result, msg)
+  File "C:\Program Files\Autodesk\3ds Max 2024\Python\lib\typing.py", line 171, in _type_check
+    raise TypeError(f"Plain {arg} is not valid as type argument")
+TypeError: Plain typing.Optional is not valid as type argument
+-------------------- LOCAL VARIABLES --------------------
+thing = '...,typing.Optional[str]'
+line = 'PySide2.QtCore.Slot(*types:type,name:str=nullptr,result:str=nullptr)->typing.Callable[...,typing.Optional[str]]'
+level = 0
+var_handler = <function handle_retvar at 0x0000027C5C0E0430>
+match = <re.Match object; span=(0, 41), match='typing.Callable[...,typing.Optional[str]]'>
+contr = typing.Callable
+contr_resolved = typing.Callable
+contr_str = 'typing.Callable'
+pieces = ['...', 'typing.Optional']
+part = 'typing.Optional[str]'
+part_res = typing.Optional[str]
+part_val = typing.Optional[str]
+thing_joined = '..., typing.Optional'
+result = 'typing.Callable[..., typing.Optional]'
+e = TypeError('Plain typing.Optional is not valid as type argument')
+traceback = <module 'traceback' from 'C:\\Program Files\\Autodesk\\3ds Max 2024\\Python\\lib\\traceback.py'>
+==================================================
+----
+
+看局部变量快照：
+
+. `part_val = typing.Optional[str]` (这是正确的解析结果)
+. `pieces = ['...', 'typing.Optional']` (这是错误的存储结果)
+. `result = 'typing.Callable[..., typing.Optional]'`
+
+问题出在这一行代码的执行结果：`pieces.append(to_string(part_val))`
+
+`to_string()` 这个函数在处理 `typing.Optional[str]` 时出错了，看下代码，可以看到专门对 typing module 做了处理，但走错分支了
+
+[source,python]
+----
+def to_string(thing):
+    if isinstance(thing, str):
+        return thing
+    if hasattr(thing, "__name__"):
+        dot = "." in str(thing)
+        name = get_name(thing)
+        return thing.__module__ + "." + name if dot else name
+    # Note: This captures things from the typing module:
+    return str(thing)
+----
+
+答案是Python在3.10以后给泛型类标注做了新的处理，支持了 `+__name__+`
+
+.Python 3.7.9
+[source,text]
+----
+Python 3.7.9 (tags/v3.7.9:13c94747c7, Aug 17 2020, 18:58:18) [MSC v.1900 64 bit (AMD64)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import typing
+>>> typing.Optional.__name__
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: '_SpecialForm' object has no attribute '__name__'
+----
+
+.Python 3.10.11
+[source,text]
+----
+Python 3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import typing
+>>> typing.Optional.__name__
+'Optional'
+----
+
+那为什么Maya没问题呢？Maya的shiboken2的版本是5.15.2.1，Max的是5.15.1，这个bug修掉了footnote:1[py3.10-prep: Fix parser.py for changed typing module https://github.com/pyside/pyside-setup/commit/4792fd22a38f2f2c0c97ff7b3aadf8c4cf8bc2fd]，看上去shiboken6做了更强的修复footnote:2[PySide6 source code https://github.com/pyside/pyside-setup/blob/a6f69fb04d8dd585974061bd177d11f1eaf3e797/sources/shiboken6/shibokenmodule/files.dir/shibokensupport/signature/parser.py#L380]，不会直接raise了，to_string的实现也做了修改
+
+但问题又回来了，为什么会调用到这玩意，而且为什么时随机崩溃。看了下代码，`pyside_type_init`（异常调用栈的起始点）只在查看函数签名时有被用到，这下破案了，是我在vscode的debug console里面，出现代码补全时，inspect 会访问到 `+__signature__+`，`+__signature__+` 是在cpp层被注册进去的，所以会损失一部分调用栈，最终触发这个异常。
+
+解决也很简单，Python就是方便，在代码执行前直接monkey patch一下：
+
+[source,python]
+----
+try:
+    import shibokensupport.signature.parser as parser_module
+    def patched_to_string(thing):
+        if isinstance(thing, str):
+            return thing
+        if hasattr(thing, "__name__") and thing.__module__ != "typing":
+            dot = "." in str(thing)
+            name = parser_module.get_name(thing)
+            return thing.__module__ + "." + name if dot else name
+        # Note: This captures things from the typing module:
+        return str(thing)
+    parser_module.to_string = patched_to_string
+except Exception:
+    pass
+----
